@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-TOKEN = os.environ.get("BOT_TOKEN", "8717718663:AAG_8d1EXC-_ymij-IcbUxneIoGeVqxj080")
+TOKEN = os.environ.get("BOT_TOKEN")
 PORT = int(os.environ.get("PORT", 8080))
 
 # Файл для хранения данных пользователей
