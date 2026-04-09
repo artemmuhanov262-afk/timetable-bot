@@ -2,8 +2,12 @@ import logging
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import MessageHandler, filters
 import os
 import json
+import asyncio
+from aiohttp import web
+import threading
 
 # Импортируем функции из excel_reader
 from excel_reader import (
@@ -25,7 +29,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-TOKEN = "8717718663:AAG_8d1EXC-_ymij-IcbUxneIoGeVqxj080"
+TOKEN = os.environ.get("BOT_TOKEN", "8717718663:AAG_8d1EXC-_ymij-IcbUxneIoGeVqxj080")
+PORT = int(os.environ.get("PORT", 8080))
 
 # Файл для хранения данных пользователей
 USER_DATA_FILE = "user_data.json"
@@ -276,7 +281,6 @@ async def today_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     weekday = today.weekday()
     day_name = DAYS_RU[weekday]
     
-    # Проверяем, есть ли пары
     schedule = get_day_schedule(group_name, week_type, day_name)
     
     if not schedule:
@@ -313,7 +317,6 @@ async def tomorrow_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     weekday = tomorrow.weekday()
     day_name = DAYS_RU[weekday]
     
-    # Проверяем, есть ли пары
     schedule = get_day_schedule(group_name, week_type, day_name)
     
     if not schedule:
@@ -332,7 +335,6 @@ async def tomorrow_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Команда /week
 async def week_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает выбор недели для расписания"""
     user_id = str(update.effective_user.id)
     
     if user_id not in user_groups:
@@ -402,7 +404,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         logger.info(f"Callback data: {data}")
         
-        # Обработка главного меню
         if data == "back_to_main":
             keyboard, info_text = get_main_keyboard(user_id)
             await query.edit_message_text(
@@ -501,7 +502,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Обработка выбора недели для расписания
         if data.startswith("week_over_"):
             group_name = data[10:]
             week_type = 1
@@ -569,7 +569,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📞 По вопросам обращайтесь к администратору.
             """
-            keyboard, info_text_main = get_main_keyboard(user_id)
+            keyboard, _ = get_main_keyboard(user_id)
             await query.edit_message_text(
                 info_text,
                 parse_mode='Markdown',
@@ -577,7 +577,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        # Обработка выбора группы
         if data.startswith("group_"):
             group_name = data[6:]
             user_groups[user_id] = group_name
@@ -612,6 +611,30 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
+# Веб-сервер для пинга и keep-alive
+async def health_check(request):
+    return web.Response(text="🤖 Бот работает!", status=200)
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    logger.info(f"🌐 Веб-сервер запущен на порту {PORT}")
+    
+    # Бесконечное ожидание
+    while True:
+        await asyncio.sleep(3600)
+
+# Запуск веб-сервера в отдельном потоке
+def start_web_server():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(run_web_server())
+
 # Главная функция
 def main():
     if not TOKEN:
@@ -623,8 +646,14 @@ def main():
     print("="*50)
     print(f"📚 Загружено групп: {len(GROUPS)}")
     print(f"👥 Загружено пользователей: {len(user_groups)}")
+    print(f"🌐 Веб-сервер будет на порту: {PORT}")
     print("="*50)
     
+    # Запускаем веб-сервер в отдельном потоке
+    web_thread = threading.Thread(target=start_web_server, daemon=True)
+    web_thread.start()
+    
+    # Запускаем бота
     application = Application.builder().token(TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
