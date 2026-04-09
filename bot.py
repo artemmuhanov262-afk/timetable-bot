@@ -4,7 +4,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import os
 import json
+import asyncio
 from aiohttp import web
+import threading
+import aiohttp as aiohttp_client
 
 # Импортируем функции из excel_reader
 from excel_reader import (
@@ -27,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 TOKEN = os.environ.get("BOT_TOKEN", "8717718663:AAG_8d1EXC-_ymij-IcbUxneIoGeVqxj080")
-PORT = int(os.environ.get("PORT", 8080))
+PORT = int(os.environ.get("PORT", 10000))
 
 # Файл для хранения данных пользователей
 USER_DATA_FILE = "user_data.json"
@@ -608,11 +611,28 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# Веб-сервер для health check
+# ========== ВЕБ-СЕРВЕР ДЛЯ HEALTH CHECK ==========
+
 async def health_check(request):
+    """Эндпоинт для проверки работоспособности"""
     return web.Response(text="🤖 Бот работает!", status=200)
 
+async def self_ping():
+    """Автоматический пинг самого себя, чтобы сервер не засыпал"""
+    while True:
+        await asyncio.sleep(240)  # каждые 4 минуты
+        try:
+            async with aiohttp_client.ClientSession() as session:
+                async with session.get(f"http://localhost:{PORT}/health") as resp:
+                    if resp.status == 200:
+                        logger.info("🔄 Self-ping успешен")
+                    else:
+                        logger.warning(f"⚠️ Self-ping вернул статус {resp.status}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка self-ping: {e}")
+
 async def run_web_server():
+    """Запуск веб-сервера для health check"""
     app = web.Application()
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
@@ -622,17 +642,21 @@ async def run_web_server():
     await site.start()
     logger.info(f"🌐 Веб-сервер запущен на порту {PORT}")
     
+    # Запускаем self-ping
+    asyncio.create_task(self_ping())
+    
     # Бесконечное ожидание
     while True:
         await asyncio.sleep(3600)
 
-# Запуск веб-сервера в отдельном потоке
 def start_web_server():
+    """Запуск веб-сервера в отдельном потоке"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(run_web_server())
 
-# Главная функция
+# ========== ГЛАВНАЯ ФУНКЦИЯ ==========
+
 def main():
     if not TOKEN:
         print("❌ ОШИБКА: Токен бота не указан!")
@@ -647,8 +671,6 @@ def main():
     print("="*50)
     
     # Запускаем веб-сервер в отдельном потоке
-    import threading
-    import asyncio
     web_thread = threading.Thread(target=start_web_server, daemon=True)
     web_thread.start()
     
