@@ -2,12 +2,9 @@ import logging
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.ext import MessageHandler, filters
 import os
 import json
-import asyncio
 from aiohttp import web
-import threading
 
 # Импортируем функции из excel_reader
 from excel_reader import (
@@ -29,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-TOKEN = os.environ.get("BOT_TOKEN","8717718663:AAG_8d1EXC-_ymij-IcbUxneIoGeVqxj080")
+TOKEN = os.environ.get("BOT_TOKEN", "8717718663:AAG_8d1EXC-_ymij-IcbUxneIoGeVqxj080")
 PORT = int(os.environ.get("PORT", 8080))
 
 # Файл для хранения данных пользователей
@@ -611,7 +608,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-# Веб-сервер для пинга и keep-alive
+# Веб-сервер для health check
 async def health_check(request):
     return web.Response(text="🤖 Бот работает!", status=200)
 
@@ -650,6 +647,8 @@ def main():
     print("="*50)
     
     # Запускаем веб-сервер в отдельном потоке
+    import threading
+    import asyncio
     web_thread = threading.Thread(target=start_web_server, daemon=True)
     web_thread.start()
     
