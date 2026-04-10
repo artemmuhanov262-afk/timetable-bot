@@ -297,6 +297,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"✅ *Группа {group_name} сохранена!*{info_text}", parse_mode='Markdown', reply_markup=keyboard)
         return
 
+# Веб-сервер для health check
 async def health_check(request):
     return web.Response(text="OK", status=200)
 
@@ -306,23 +307,40 @@ async def run_web_server():
     app.router.add_get('/health', health_check)
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', PORT).start()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
     logger.info(f"Web server on port {PORT}")
     while True:
         await asyncio.sleep(3600)
 
-def start_web_server():
-    asyncio.run(run_web_server())
-
-def main():
+async def main():
     print("Starting bot...")
-    import threading
-    threading.Thread(target=start_web_server, daemon=True).start()
-    app = Application.builder().token(TOKEN).build()
-    for handler in [CommandHandler("start", start), CommandHandler("help", help_command), CommandHandler("today", today_schedule), CommandHandler("tomorrow", tomorrow_schedule), CommandHandler("week", week_schedule), CommandHandler("setgroup", setgroup), CommandHandler("mygroup", mygroup), CallbackQueryHandler(button_callback)]:
-        app.add_handler(handler)
+    
+    # Запускаем веб-сервер
+    asyncio.create_task(run_web_server())
+    
+    # Создаём и запускаем бота
+    application = Application.builder().token(TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("today", today_schedule))
+    application.add_handler(CommandHandler("tomorrow", tomorrow_schedule))
+    application.add_handler(CommandHandler("week", week_schedule))
+    application.add_handler(CommandHandler("setgroup", setgroup))
+    application.add_handler(CommandHandler("mygroup", mygroup))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    
     print("Bot is running!")
-    app.run_polling()
+    
+    # Инициализируем и запускаем
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+    
+    # Держим бота запущенным
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
