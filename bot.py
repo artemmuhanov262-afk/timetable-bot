@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, AIORateLimiter
 import os
 import json
 from aiohttp import web
@@ -613,6 +613,20 @@ async def health_check(request):
     except:
         return web.Response(text="Database Error", status=500)
 
+async def keep_alive():
+    """Keep bot awake by pinging itself every 10 minutes"""
+    while True:
+        await asyncio.sleep(600)  # 10 минут
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{WEBHOOK_URL}/health") as resp:
+                    if resp.status == 200:
+                        logger.info("Keep-alive ping sent successfully")
+                    else:
+                        logger.warning(f"Keep-alive ping failed with status: {resp.status}")
+        except Exception as e:
+            logger.error(f"Keep-alive error: {e}")
+
 async def main():
     """Основная функция запуска бота - ТОЛЬКО WEBHOOK, без polling"""
     logger.info("Starting bot with webhook on Render...")
@@ -634,8 +648,12 @@ async def main():
     logger.info("Deleted existing webhooks")
     await temp_app.shutdown()
     
-    # Создаём приложение бота
-    application = Application.builder().token(TOKEN).build()
+    # Создаём приложение бота с параллельной обработкой и ограничителем скорости
+    application = Application.builder() \
+        .token(TOKEN) \
+        .concurrent_updates(10) \
+        .rate_limiter(AIORateLimiter()) \
+        .build()
     
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
@@ -649,6 +667,10 @@ async def main():
     
     # Инициализируем приложение
     await application.initialize()
+    
+    # Запускаем keep-alive задачу
+    asyncio.create_task(keep_alive())
+    logger.info("Keep-alive task started")
     
     # Настройка веб-сервера для вебхуков
     app = web.Application()
@@ -684,7 +706,7 @@ async def main():
     # Запускаем application
     await application.start()
     
-    logger.info(f"Bot is running on port {PORT} with webhook!")
+    logger.info(f"Bot is running on port {PORT} with webhook! (concurrent_updates=10, rate_limiter=ON)")
     
     # Держим приложение запущенным
     try:
