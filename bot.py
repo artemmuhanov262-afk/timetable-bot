@@ -503,9 +503,16 @@ async def health_check(request):
     return web.Response(text="OK", status=200)
 
 async def main():
-    """Основная функция запуска бота"""
+    """Основная функция запуска бота - ТОЛЬКО WEBHOOK, без polling"""
     logger.info("Starting bot with webhook on Render...")
     logger.info(f"Webhook URL: {WEBHOOK_URL}")
+    
+    # Сначала удаляем все существующие вебхуки, чтобы избежать конфликтов
+    temp_app = Application.builder().token(TOKEN).build()
+    await temp_app.initialize()
+    await temp_app.bot.delete_webhook(drop_pending_updates=True)
+    logger.info("Deleted existing webhooks")
+    await temp_app.shutdown()
     
     # Создаём приложение бота
     application = Application.builder().token(TOKEN).build()
@@ -519,6 +526,9 @@ async def main():
     application.add_handler(CommandHandler("setgroup", setgroup))
     application.add_handler(CommandHandler("mygroup", mygroup))
     application.add_handler(CallbackQueryHandler(button_callback))
+    
+    # Инициализируем приложение
+    await application.initialize()
     
     # Настройка веб-сервера для вебхуков
     app = web.Application()
@@ -551,6 +561,9 @@ async def main():
     await application.bot.set_webhook(webhook_url)
     logger.info(f"Webhook successfully set to {webhook_url}")
     
+    # Запускаем application
+    await application.start()
+    
     logger.info(f"Bot is running on port {PORT} with webhook!")
     
     # Держим приложение запущенным
@@ -561,10 +574,14 @@ async def main():
         logger.info("Shutting down...")
         await application.bot.delete_webhook()
         await runner.cleanup()
+        await application.stop()
+        await application.shutdown()
     except Exception as e:
         logger.error(f"Unexpected error: {e}")
         await application.bot.delete_webhook()
         await runner.cleanup()
+        await application.stop()
+        await application.shutdown()
         raise
 
 if __name__ == "__main__":
