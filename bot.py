@@ -6,6 +6,8 @@ import os
 import json
 from aiohttp import web
 import asyncio
+import psycopg2
+from psycopg2.extras import DictCursor
 
 # Импортируем функции из excel_reader
 from excel_reader import (
@@ -35,8 +37,9 @@ WEBHOOK_URL = os.environ.get("WEBHOOK_URL")
 if not WEBHOOK_URL:
     raise ValueError("WEBHOOK_URL environment variable is not set")
 
-# Файл для хранения данных пользователей
-USER_DATA_FILE = "user_data.json"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("DATABASE_URL environment variable is not set")
 
 # Кеш для расписания
 _timetable_cache = None
@@ -69,33 +72,106 @@ except Exception as e:
     logger.error(f"Error loading groups: {e}")
     GROUPS = []
 
-# Загружаем данные пользователей
-def load_user_data():
-    if os.path.exists(USER_DATA_FILE):
-        try:
-            with open(USER_DATA_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Error loading user data: {e}")
-    return {}
-
-def save_user_data(data):
+# Работа с базой данных
+def init_database():
+    """Инициализация таблиц в PostgreSQL"""
     try:
-        # Валидация данных
-        validated_data = {}
-        for user_id, group in data.items():
-            if group in GROUPS:
-                validated_data[user_id] = group
-            else:
-                logger.warning(f"Invalid group {group} for user {user_id}")
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
         
-        with open(USER_DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(validated_data, f, ensure_ascii=False, indent=2)
-        logger.info(f"Saved data for {len(validated_data)} users")
+        # Создаем таблицу для пользователей
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id VARCHAR(50) PRIMARY KEY,
+                group_name VARCHAR(100) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Создаем таблицу для логов (опционально)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bot_logs (
+                id SERIAL PRIMARY KEY,
+                user_id VARCHAR(50),
+                command VARCHAR(50),
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("Database initialized successfully")
     except Exception as e:
-        logger.error(f"Error saving user data: {e}")
+        logger.error(f"Database initialization error: {e}")
+        raise
 
-user_groups = load_user_data()
+def get_user_group(user_id):
+    """Получить группу пользователя из базы данных"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor(cursor_factory=DictCursor)
+        cur.execute("SELECT group_name FROM users WHERE user_id = %s", (user_id,))
+        result = cur.fetchone()
+        cur.close()
+        conn.close()
+        return result['group_name'] if result else None
+    except Exception as e:
+        logger.error(f"Error getting user group: {e}")
+        return None
+
+def set_user_group(user_id, group_name):
+    """Сохранить группу пользователя в базу данных"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO users (user_id, group_name, updated_at) 
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (user_id) 
+            DO UPDATE SET group_name = %s, updated_at = CURRENT_TIMESTAMP
+        """, (user_id, group_name, group_name))
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info(f"Saved group {group_name} for user {user_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving user group: {e}")
+        return False
+
+def get_all_users():
+    """Получить всех пользователей (для администрирования)"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor(cursor_factory=DictCursor)
+        cur.execute("SELECT user_id, group_name, created_at, updated_at FROM users ORDER BY updated_at DESC")
+        results = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [dict(row) for row in results]
+    except Exception as e:
+        logger.error(f"Error getting all users: {e}")
+        return []
+
+def log_command(user_id, command):
+    """Логирование команд пользователей"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO bot_logs (user_id, command) VALUES (%s, %s)",
+            (user_id, command)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Error logging command: {e}")
+
+# Инициализируем базу данных при старте
+init_database()
 
 def get_day_schedule(group_name, week_type, day_name):
     """Получение расписания на день"""
@@ -180,10 +256,11 @@ def get_main_keyboard(user_id=None):
     ]
     
     info_text = ""
-    if user_id and user_id in user_groups:
-        group_name = user_groups[user_id]
-        week_name = get_week_type_name(get_week_type())
-        info_text = f"\n\n👥 *Группа:* {group_name}\n📅 *Неделя:* {week_name}"
+    if user_id:
+        group_name = get_user_group(user_id)
+        if group_name:
+            week_name = get_week_type_name(get_week_type())
+            info_text = f"\n\n👥 *Группа:* {group_name}\n📅 *Неделя:* {week_name}"
     
     return InlineKeyboardMarkup(keyboard), info_text
 
@@ -229,9 +306,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown',
         reply_markup=keyboard
     )
+    
+    # Логируем команду
+    log_command(user_id, "start")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /help"""
+    user_id = str(update.effective_user.id)
     await update.message.reply_text(
         "📚 *Помощь:*\n"
         "/today - расписание на сегодня\n"
@@ -241,12 +322,15 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/mygroup - показать мою группу",
         parse_mode='Markdown'
     )
+    log_command(user_id, "help")
 
 async def today_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать расписание на сегодня"""
     user_id = str(update.effective_user.id)
+    log_command(user_id, "today")
     
-    if user_id not in user_groups:
+    group_name = get_user_group(user_id)
+    if not group_name:
         keyboard, _ = get_main_keyboard(user_id)
         await update.message.reply_text(
             "❌ Выберите группу через /setgroup",
@@ -254,7 +338,6 @@ async def today_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    group_name = user_groups[user_id]
     week_type = get_week_type()
     day_name = DAYS_RU[datetime.now().weekday()]
     schedule = get_day_schedule(group_name, week_type, day_name)
@@ -283,8 +366,10 @@ async def today_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def tomorrow_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать расписание на завтра"""
     user_id = str(update.effective_user.id)
+    log_command(user_id, "tomorrow")
     
-    if user_id not in user_groups:
+    group_name = get_user_group(user_id)
+    if not group_name:
         keyboard, _ = get_main_keyboard(user_id)
         await update.message.reply_text(
             "❌ Выберите группу через /setgroup",
@@ -292,7 +377,6 @@ async def tomorrow_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    group_name = user_groups[user_id]
     week_type = get_week_type()
     day_name = DAYS_RU[(datetime.now() + timedelta(days=1)).weekday()]
     schedule = get_day_schedule(group_name, week_type, day_name)
@@ -311,12 +395,13 @@ async def tomorrow_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def week_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать расписание на неделю"""
     user_id = str(update.effective_user.id)
+    log_command(user_id, "week")
     
-    if user_id not in user_groups:
+    group_name = get_user_group(user_id)
+    if not group_name:
         await update.message.reply_text("❌ Выберите группу через /setgroup")
         return
     
-    group_name = user_groups[user_id]
     await update.message.reply_text(
         f"📚 *Группа {group_name}*\n\nВыберите неделю:",
         parse_mode='Markdown',
@@ -325,6 +410,9 @@ async def week_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Выбрать группу"""
+    user_id = str(update.effective_user.id)
+    log_command(user_id, "setgroup")
+    
     if not GROUPS:
         await update.message.reply_text("❌ Список групп не загружен")
         return
@@ -338,10 +426,12 @@ async def setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def mygroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показать выбранную группу"""
     user_id = str(update.effective_user.id)
+    log_command(user_id, "mygroup")
     
-    if user_id in user_groups:
+    group_name = get_user_group(user_id)
+    if group_name:
         await update.message.reply_text(
-            f"✅ Ваша группа: *{user_groups[user_id]}*",
+            f"✅ Ваша группа: *{group_name}*",
             parse_mode='Markdown'
         )
     else:
@@ -353,6 +443,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(query.from_user.id)
     await query.answer()
     data = query.data
+    
+    # Логируем действие
+    log_command(user_id, f"callback_{data[:50]}")
     
     # Обработка навигации
     if data == "back_to_main":
@@ -374,11 +467,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Обработка сегодня/завтра
     if data == "today":
-        if user_id not in user_groups:
+        group_name = get_user_group(user_id)
+        if not group_name:
             await query.edit_message_text("❌ Выберите группу в главном меню")
             return
         
-        group_name = user_groups[user_id]
         week_type = get_week_type()
         day_name = DAYS_RU[datetime.now().weekday()]
         schedule = get_day_schedule(group_name, week_type, day_name)
@@ -397,11 +490,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     if data == "tomorrow":
-        if user_id not in user_groups:
+        group_name = get_user_group(user_id)
+        if not group_name:
             await query.edit_message_text("❌ Выберите группу в главном меню")
             return
         
-        group_name = user_groups[user_id]
         week_type = get_week_type()
         day_name = DAYS_RU[(datetime.now() + timedelta(days=1)).weekday()]
         schedule = get_day_schedule(group_name, week_type, day_name)
@@ -421,11 +514,11 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Обработка недельного расписания
     if data == "week_schedule":
-        if user_id not in user_groups:
+        group_name = get_user_group(user_id)
+        if not group_name:
             await query.edit_message_text("❌ Выберите группу в главном меню")
             return
         
-        group_name = user_groups[user_id]
         await query.edit_message_text(
             f"📚 *Группа {group_name}*\n\nВыберите неделю:",
             parse_mode='Markdown',
@@ -475,11 +568,19 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "info":
         keyboard, info_text = get_main_keyboard(user_id)
         await query.edit_message_text(
-            "ℹ️ *Информация*\n\n"
-            "Бот расписания факультета 'Экономика и право'\n\n"
-            "📅 Расписание обновляется автоматически\n"
-            "👥 Поддерживаются все группы факультета\n"
-            "🔄 Автоматическое определение четной/нечетной недели",
+            "ℹ️ *Информация о боте*\n\n"
+            "🤖 Бот расписания факультета \"Экономика и право\"\n\n"
+            "📅 *Недели:*\n"
+            "• Над чертой (I) - верхняя неделя\n"
+            "• Под чертой (II) - нижняя неделя\n\n"
+            "🕐 *Время пар:*\n"
+            "1 пара: 08:30 - 10:00\n"
+            "2 пара: 10:10 - 11:40\n"
+            "3 пара: 12:20 - 13:50\n"
+            "4 пара: 14:00 - 15:30\n"
+            "5 пара: 15:40 - 17:10\n"
+            "6 пара: 17:20 - 18:50\n"
+            "7 пара: 19:00 - 20:30",
             parse_mode='Markdown',
             reply_markup=keyboard
         )
@@ -487,25 +588,44 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if data.startswith("group_"):
         group_name = data[6:]
-        user_groups[user_id] = group_name
-        save_user_data(user_groups)
-        keyboard, info_text = get_main_keyboard(user_id)
-        await query.edit_message_text(
-            f"✅ *Группа {group_name} сохранена!*{info_text}",
-            parse_mode='Markdown',
-            reply_markup=keyboard
-        )
+        if set_user_group(user_id, group_name):
+            keyboard, info_text = get_main_keyboard(user_id)
+            await query.edit_message_text(
+                f"✅ *Группа {group_name} сохранена!*{info_text}",
+                parse_mode='Markdown',
+                reply_markup=keyboard
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Ошибка при сохранении группы. Попробуйте позже.",
+                parse_mode='Markdown'
+            )
         return
 
 # Веб-сервер для Render.com
 async def health_check(request):
     """Health check endpoint for Render"""
-    return web.Response(text="OK", status=200)
+    # Проверяем соединение с базой данных
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.close()
+        return web.Response(text="OK", status=200)
+    except:
+        return web.Response(text="Database Error", status=500)
 
 async def main():
     """Основная функция запуска бота - ТОЛЬКО WEBHOOK, без polling"""
     logger.info("Starting bot with webhook on Render...")
     logger.info(f"Webhook URL: {WEBHOOK_URL}")
+    
+    # Проверяем подключение к базе данных
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.close()
+        logger.info("Database connection successful")
+    except Exception as e:
+        logger.error(f"Database connection failed: {e}")
+        raise
     
     # Сначала удаляем все существующие вебхуки, чтобы избежать конфликтов
     temp_app = Application.builder().token(TOKEN).build()
