@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, AIORateLimiter
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import os
 import json
 from aiohttp import web
@@ -648,11 +648,10 @@ async def main():
     logger.info("Deleted existing webhooks")
     await temp_app.shutdown()
     
-    # Создаём приложение бота с параллельной обработкой и ограничителем скорости
+    # Создаём приложение бота с параллельной обработкой (без rate_limiter)
     application = Application.builder() \
         .token(TOKEN) \
         .concurrent_updates(10) \
-        .rate_limiter(AIORateLimiter()) \
         .build()
     
     # Добавляем обработчики
@@ -706,7 +705,7 @@ async def main():
     # Запускаем application
     await application.start()
     
-    logger.info(f"Bot is running on port {PORT} with webhook! (concurrent_updates=10, rate_limiter=ON)")
+    logger.info(f"Bot is running on port {PORT} with webhook! (concurrent_updates=10)")
     
     # Держим приложение запущенным
     try:
